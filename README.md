@@ -8,13 +8,7 @@ This Docker image adapts the [GliderLabs Registrator](https://github.com/gliderl
       "family": "registrator",
       "containerDefinitions": [
         {
-          "volumesFrom": [],
-          "portMappings": [],
-          "command": [],
-          "environment": [],
           "essential": true,
-          "entryPoint": [],
-          "links": [],
           "mountPoints": [
             {
               "containerPath": "/rootfs",
