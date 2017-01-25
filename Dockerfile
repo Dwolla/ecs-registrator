@@ -1,4 +1,4 @@
-FROM gliderlabs/registrator:v6
+FROM gliderlabs/registrator:v7
 MAINTAINER Dwolla Platform Team
 ADD registrator_on_ec2_hostname.sh /usr/local/bin/registrator_on_ec2_hostname.sh
 RUN apk-install curl
