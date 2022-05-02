@@ -1,0 +1,139 @@
+name: Continuous Deployment
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  LOCAL_TAG: dwolla/ecs-registrator:local
+
+jobs:
+  build-and-push:
+    name: Build, test, and publish images
+    runs-on: ${{ matrix.os }}
+    outputs:
+      windows-2019-os-version: ${{ steps.get-versions.outputs.windows-2019-os-version }}
+      windows-2022-os-version: ${{ steps.get-versions.outputs.windows-2022-os-version }}
+      manifest-list: ${{ steps.get-versions.outputs.manifest-list }}
+      git-tag: ${{ steps.get-versions.outputs.git-tag }}
+    strategy:
+      max-parallel: 2
+      matrix:
+        os: [windows-2019, windows-2022]
+        include:
+        - os: windows-2019
+          dockerfile: windows/nanoserver-1809/Dockerfile
+          tag_suffix: nanoserver-1809-amd64
+          context: windows
+        - os: windows-2022
+          dockerfile: windows/nanoserver-ltsc2022/Dockerfile
+          tag_suffix: nanoserver-ltsc2022-amd64
+          context: windows
+    steps:
+      - name: Checkout current branch
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ env.LOCAL_TAG }} --file ${{ matrix.dockerfile }} ${{ matrix.context }}
+
+      - name: Get versions
+        id: get-versions
+        run: |
+          $rawOsVersion = docker run --rm --entrypoint "cmd.exe" ${{ env.LOCAL_TAG }} /c ver  | Select -Skip 1 | Select -First 1
+          $rawOsVersion -match '.*\[Version (?<version>\d+\.\d+\.\d+\.\d+)\]'
+          $osVersion = $Matches.version
+          $version = docker run --rm ${{ env.LOCAL_TAG }} --version | Select -First 1
+          $revision = Get-Content "$env:GITHUB_WORKSPACE\revision.txt" | Select -First 1
+          Write-Output "::set-output name=${{ matrix.os }}-os-version::${osVersion}"
+          Write-Output "::set-output name=git-tag::${version}-${revision}"
+          Write-Output "::set-output name=manifest-list::dwolla/ecs-registrator:$($version.substring(1))-${revision}"
+          Write-Output "::set-output name=docker-tag::dwolla/ecs-registrator:$($version.substring(1))-${revision}-${{ matrix.tag_suffix }}"
+
+      - name: Push Docker image
+        run: |
+          if (! (docker manifest inspect ${{ steps.get-versions.outputs.docker-tag }}))
+          {
+            Write-Output "Docker tag ${{ steps.get-versions.outputs.docker-tag }} does not exist, publishing."
+            docker tag ${{ env.LOCAL_TAG }} ${{ steps.get-versions.outputs.docker-tag }}
+            docker push ${{ steps.get-versions.outputs.docker-tag }}
+          } 
+          else
+          {
+            Write-Output "Docker tag already exists: ${{ steps.get-versions.outputs.docker-tag }}. Please increment revision.txt."
+            exit 1
+          }
+
+  publish-manifest:
+    name: Publish manifest
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    steps:
+      - name: Checkout current branch
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Publish Docker manifest
+        run: |
+          docker manifest create ${{ needs.build-and-push.outputs.manifest-list }} \
+            --amend ${{ needs.build-and-push.outputs.manifest-list }}-nanoserver-1809-amd64 \
+            --amend ${{ needs.build-and-push.outputs.manifest-list }}-nanoserver-ltsc2022-amd64
+
+          docker manifest annotate --os windows --arch amd64 \
+            --os-version ${{ needs.build-and-push.outputs.windows-2019-os-version }} \
+            ${{ needs.build-and-push.outputs.manifest-list }} ${{ needs.build-and-push.outputs.manifest-list }}-nanoserver-1809-amd64
+
+          docker manifest annotate --os windows --arch amd64 \
+            --os-version ${{ needs.build-and-push.outputs.windows-2022-os-version }} \
+            ${{ needs.build-and-push.outputs.manifest-list }} ${{ needs.build-and-push.outputs.manifest-list }}-nanoserver-ltsc2022-amd64
+
+          docker manifest push ${{ needs.build-and-push.outputs.manifest-list }}
+
+  create-tag:
+    name: Create tag
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    steps:
+      - name: Create tag
+        uses: actions/github-script@v6
+        with:
+          script: |
+            try {
+              const resp = await github.rest.git.getRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: 'tags/${{ needs.build-and-push.outputs.git-tag }}',
+              });
+              return core.setFailed("Tag already exists: ${{ needs.build-and-push.outputs.git-tag }}. Please increment revision.txt.");
+            } catch (error) {
+                if (error.status === 404) {
+                  github.rest.git.createRef({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    ref: 'refs/tags/${{ needs.build-and-push.outputs.git-tag }}',
+                    sha: context.sha
+                  })
+
+                  core.info("Git tag ${{ needs.build-and-push.outputs.git-tag }} does not exist, publishing.")
+                } else {
+                  throw error;
+                }
+            }
+
+            

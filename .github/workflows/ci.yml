@@ -1,0 +1,83 @@
+name: Continous Integration
+
+on:
+  pull_request:
+    branches: ['**']
+  push:
+    branches-ignore:
+      - main
+
+env:
+  LOCAL_TAG: dwolla/ecs-registrator:local
+
+concurrency:
+  group: build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and Test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      max-parallel: 2
+      matrix:
+        os: [windows-2019, windows-2022]
+        include:
+        - os: windows-2019
+          dockerfile: windows/nanoserver-1809/Dockerfile
+          context: windows
+        - os: windows-2022
+          dockerfile: windows/nanoserver-ltsc2022/Dockerfile
+          context: windows
+    steps:
+      - name: Checkout current branch
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Build Docker image
+        id: build_docker_image
+        run: |
+          docker build -t ${{ env.LOCAL_TAG }} -f ${{ matrix.dockerfile }} ${{ matrix.context }}
+
+      - name: Get versions
+        id: get-versions
+        run: |
+          $version = docker run --rm ${{ env.LOCAL_TAG }} --version | Select -First 1
+          $revision = Get-Content "$env:GITHUB_WORKSPACE\revision.txt" | Select -First 1
+          Write-Output "::set-output name=git-tag::${version}-${revision}"
+          Write-Output "::set-output name=docker-tag::dwolla/ecs-registrator:$($version.substring(1))-${revision}"
+
+      - name: Check if Docker tag exists
+        run: |
+          if (docker manifest inspect ${{ steps.get-versions.outputs.docker-tag }})
+          {
+            Write-Output "Docker tag already exists: ${{ steps.get-versions.outputs.docker-tag }}. Please increment revision.txt."
+            exit 1
+          }
+          else
+          {
+            Write-Output "Docker tag ${{ steps.get-versions.outputs.docker-tag }} does not exist."
+            exit 0
+          }
+
+      - name: Check if git tag exists
+        uses: actions/github-script@v6
+        with:
+          script: |
+            try {
+              const resp = await github.rest.git.getRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: 'tags/${{ needs.build.outputs.git-tag }}',
+              });
+              return core.setFailed("Git tag already exists: ${{ needs.build.outputs.git-tag }}. Please increment revision.txt.");
+            } catch (error) {
+                if (error.status === 404) {
+                  core.info("Git tag ${{ needs.build.outputs.git-tag }} does not exist.")
+                } else {
+                  throw error;
+                }
+            }
+
+            

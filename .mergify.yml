@@ -1,0 +1,9 @@
+pull_request_rules:
+  - name: automatic merge for Dependabot pull requests
+    conditions:
+      - author~=^dependabot(|-preview)\[bot\]$
+      - status-success=Build and Test (windows-2019, windows/nanoserver-1809/Dockerfile, windows)
+      - status-success=Build and Test (windows-2022, windows/nanoserver-ltsc2022/Dockerfile, windows)
+    actions:
+      merge:
+        method: squash
